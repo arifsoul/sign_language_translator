@@ -20,13 +20,11 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Hugging Face Hub CLI
-        run: pip install -U "huggingface_hub[cli]"
+      - name: Install Hugging Face Hub
+        run: pip install -U huggingface_hub
 
       - name: Upload Repo to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # The CLI securely uploads only the latest files, 
-          # ignoring Git history where deleted binary files were complaining!
-          huggingface-cli upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
+          python -c "from huggingface_hub import HfApi; import os; api = HfApi(token=os.environ.get('HF_TOKEN')); api.upload_folder(folder_path='.', repo_id='arifsoul/sign_language_translator', repo_type='space', commit_message='Sync GitHub to Space', ignore_patterns=['.git/*', '.github/*'])"
