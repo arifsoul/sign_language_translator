@@ -22,11 +22,12 @@ jobs:
 
       - name: Install Hugging Face Hub
         run: pip install -U huggingface_hub
-
+      
+      - name: Update PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      
       - name: Upload Repo to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config lfs.allowincompletepush true
-          git remote rm origin || true
-          git push --force https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main
+          hf upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
