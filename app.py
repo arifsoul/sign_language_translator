@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from groq import Groq
 from gtts import gTTS
 from dotenv import load_dotenv
 import io
@@ -20,14 +19,31 @@ load_dotenv()
 
 app = FastAPI()
 
-# Load BISINDO Model Vocabulary for AI context
+# Load BISINDO Model Vocabulary and Prototypes for AI context
 BISINDO_VOCAB = []
+PROTOTYPES = {}
+import math
+
 try:
     with open('bisindo_model.json', 'r') as f:
         model_data = json.load(f)
         BISINDO_VOCAB = sorted(list(model_data.keys()))
+        
+        for key, samples in model_data.items():
+            if not samples: continue
+            n = len(samples)
+            avg_landmarks = [{"x": 0, "y": 0, "z": 0} for _ in range(21)]
+            for sample in samples:
+                lms = sample.get("landmarks", [])
+                for i in range(21):
+                    if i < len(lms):
+                        avg_landmarks[i]["x"] += lms[i].get("x", 0) / n
+                        avg_landmarks[i]["y"] += lms[i].get("y", 0) / n
+                        avg_landmarks[i]["z"] += lms[i].get("z", 0) / n
+            PROTOTYPES[key] = avg_landmarks
+            
 except Exception as e:
-    print(f"⚠️ Error loading model vocab: {e}")
+    print(f"⚠️ Error loading model vocab/prototypes: {e}")
 
 # Configure CORS
 app.add_middleware(
@@ -38,8 +54,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Groq client
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# (LLM Prediction disabled, previously Groq client initialized here)
+client = None
 
 @app.get("/metadata")
 async def get_metadata():
@@ -95,33 +111,21 @@ async def save_config(data: ConfigData):
 
 @app.post("/translate")
 async def translate_gesture(data: GestureData):
+    """Murni gTTS (Text to Speech) tanpa campur tangan LLM untuk terjemahan."""
     try:
-        # 1. Process with Groq for BISINDO contextual translation
-        vocab_hint = ", ".join(BISINDO_VOCAB)
-        completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"You are a professional BISINDO (Bahasa Isyarat Indonesia) interpreter. The user will provide a sequence of signs. Your task is to translate it into a natural, grammatically correct Indonesian sentence. \n\nCosakata yang tersedia dalam model deteksi kami adalah: [{vocab_hint}]. \nAsumsikan input adalah susunan huruf atau kata dari daftar tersebut. Berikan hasil akhir saja tanpa penjelasan."
-                },
-                {
-                    "role": "user",
-                    "content": f"Terjemahkan input BISINDO berikut: {data.gesture_name}"
-                }
-            ],
-            max_tokens=60
-        )
+        # Gunakan teks asli dari draf kata
+        translated_text = data.gesture_name
         
-        translated_text = completion.choices[0].message.content.strip()
+        if not translated_text or translated_text == "-":
+            return {"error": "Buffer kosong"}
 
-        # 2. Convert text to speech using gTTS
+        # 1. Convert text to speech using gTTS
         tts = gTTS(text=translated_text, lang='id')
         audio_fp = io.BytesIO()
         tts.write_to_fp(audio_fp)
         audio_fp.seek(0)
         
-        # 3. Encode audio to base64
+        # 2. Encode audio to base64
         audio_base64 = base64.b64encode(audio_fp.read()).decode('utf-8')
 
         return {
@@ -131,6 +135,87 @@ async def translate_gesture(data: GestureData):
         }
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/predict")
+async def predict_sign(data: GestureData):
+    """Menggunakan Groq AI untuk memprediksi huruf/angka berdasarkan landmarks."""
+    if not data.landmarks:
+        raise HTTPException(status_code=400, detail="Landmarks required")
+    
+    try:
+        # 1. Normalize INPUT sama seperti frontend (Zero-centered & MaxDist scaled)
+        l0 = data.landmarks[0]
+        centered_input = []
+        max_dist_input = 0.0
+        for pt in data.landmarks:
+            dx = pt["x"] - l0["x"]
+            dy = pt["y"] - l0["y"]
+            dz = pt["z"] - l0["z"]
+            centered_input.append({"x": dx, "y": dy, "z": dz})
+            dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+            if dist > max_dist_input: max_dist_input = dist
+            
+        if max_dist_input == 0: max_dist_input = 1.0
+        
+        rel_input = [{"x": p["x"]/max_dist_input, "y": p["y"]/max_dist_input, "z": p["z"]/max_dist_input} for p in centered_input]
+        
+        # 2. Compute Distances against PROTOTYPES
+        best_match_key = "?"
+        best_dist = float('inf')
+        
+        for key, lms in PROTOTYPES.items():
+            if not lms or len(lms) < 21: continue
+            
+            p0 = lms[0]
+            centered_p = []
+            max_dist_p = 0.0
+            for pt in lms:
+                dx = pt["x"] - p0["x"]
+                dy = pt["y"] - p0["y"]
+                dz = pt["z"] - p0["z"]
+                centered_p.append({"x": dx, "y": dy, "z": dz})
+                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+                if dist > max_dist_p: max_dist_p = dist
+                
+            if max_dist_p == 0: max_dist_p = 1.0
+            
+            rel_p = [{"x": p["x"]/max_dist_p, "y": p["y"]/max_dist_p, "z": p["z"]/max_dist_p} for p in centered_p]
+            
+            # Hitung jarak rata-rata Euclidean
+            dist = 0
+            for i in range(21):
+                dist += math.sqrt(
+                    (rel_input[i]["x"] - rel_p[i]["x"])**2 +
+                    (rel_input[i]["y"] - rel_p[i]["y"])**2 +
+                    (rel_input[i]["z"] - rel_p[i]["z"])**2
+                )
+            avg_dist = dist / 21.0
+            
+            if avg_dist < best_dist:
+                best_dist = avg_dist
+                best_match_key = key
+                
+        # 3. Evaluasi terhadap Threshold Konfigurasi
+        # match_slider dari UI bernilai 0.0 - 1.0. Makin besar (e.g 1.0) artinya AI harus makin strict/yakin.
+        config = configparser.ConfigParser()
+        config.read(CONFIG_FILE)
+        match_threshold = float(config['thresholds'].get('match', 0.5)) if 'thresholds' in config else 0.5
+        
+        # Range wajar avg_dist adalah 0.05 (sangat mirip) hingga ~0.4 (sangat beda).
+        # Kita petakan ke dynamic_dist_threshold. Jika match_threshold=1.0 -> dist_thresh = 0.12 (Strict)
+        # Jika match_threshold=0.0 -> dist_thresh = 0.40 (Loose)
+        dynamic_dist_threshold = 0.40 - (match_threshold * 0.28)
+        
+        if best_dist > dynamic_dist_threshold:
+            predicted_char = "?"
+        else:
+            predicted_char = best_match_key
+
+        return {"prediction": predicted_char}
+
+    except Exception as e:
+        print(f"Prediction Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # Note: Mount StaticFiles AFTER API routes so it doesn't shadow them

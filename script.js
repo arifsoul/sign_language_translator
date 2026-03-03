@@ -9,12 +9,8 @@ let bisindoModel = null;
 let cameraStream = null;
 let floatingPredictions = [];
 let translationHistory = []; // { text, audio, timestamp }
-
-// Shake Detection State
-let wristHistory = [];
-const SHAKE_WINDOW = 12; 
-let SHAKE_SLIDER = 0.50; // 0-1 UI value
-let SHAKE_THRESHOLD = 0.25; // Internal mapped value
+let shakeHistory = [ [], [] ]; // array of wrist points for each hand to detect shake
+let pendingPrediction = ""; // the character predicted by AI waiting for confirmation
 
 // Active Interaction State
 let virtualButtons = [];
@@ -27,14 +23,16 @@ const DWELL_TIME = 600;
 // Interactive Gesture State
 let lastInteractiveGesture = "none";
 let gestureDebounceTimer = 0;
+let isGestureArmed = false; // Safety lock
+let isSignModeActive = false; // Real-time Sign Mode
 const GESTURE_DEBOUNCE = 500; // ms
 
 // Configuration
 const FADE_SPEED = 0.04;
-const LETTER_COOLDOWN = 1000; 
+const LETTER_COOLDOWN = 1200; 
 let MATCH_SLIDER = 0.50; // 0-1 UI value
 let MATCH_THRESHOLD = 0.85; // Internal mapped value
-let CONFIDENCE_THRESHOLD = 0.50; // 0-1 directly
+let SHAKE_SLIDER = 0.50; // 0-1 UI value
 
 // ... (rest of the file constants)
 // I'll use multi_replace for specific parts instead to be safer with large file
@@ -50,18 +48,15 @@ async function init() {
         'webcam', 'output_canvas', 'word-buffer', 
         'clear-buffer-btn', 'translate-btn', 'status-dot', 'status-text',
         'theme-toggle', 'backspace-btn', 'confidence-container', 
-        'confidence-bar', 'confidence-value', 'shake-indicator',
-        'model-badge', 'model-status', 'best-match-display', 
-        'camera-toggle-btn', 'camera-toggle-dot', 
+        'best-match-display', 'camera-toggle-btn', 'camera-toggle-dot', 
         'camera-status-text', 'virtual-cursor',
         'match-threshold-input', 'match-threshold-val',
         'shake-threshold-input', 'shake-threshold-val',
-        'conf-threshold-input', 'conf-threshold-val',
         'word-buffer-container', 'open-settings-btn', 'close-settings-btn',
         'settings-modal', 'settings-backdrop', 'settings-content',
         'save-settings-btn', 'ai-notification-container', 'history-container',
         'history-count', 'history-empty-state', 'clear-history-btn',
-        'speak-buffer-btn'
+        'speak-buffer-btn', 'mode-status-text', 'mode-badge'
     ];
     
     ids.forEach(id => {
@@ -80,6 +75,30 @@ async function init() {
     setTimeout(updateVBtnRects, 1000);
 
     loadModel();
+    updateModeUI();
+}
+
+/**
+ * Updates the persistent Mode Indicator badge
+ */
+function updateModeUI() {
+    const textEl = els['mode-status-text'];
+    const badgeEl = els['mode-badge'];
+    if (!textEl || !badgeEl) return;
+
+    if (isSignModeActive) {
+        textEl.innerText = "SIGN MODE";
+        textEl.className = "text-[0.6rem] font-black tracking-widest text-emerald-500 uppercase";
+        badgeEl.className = "flex items-center gap-2 px-3 py-1 bg-emerald-500/5 rounded-full border border-emerald-500/20 shadow-[0_0_10px_rgba(16,185,129,0.1)]";
+    } else if (isGestureArmed) {
+        textEl.innerText = "ARMED";
+        textEl.className = "text-[0.6rem] font-black tracking-widest text-primary-500 uppercase";
+        badgeEl.className = "flex items-center gap-2 px-3 py-1 bg-primary-500/5 rounded-full border border-primary-500/20";
+    } else {
+        textEl.innerText = "LOCKED";
+        textEl.className = "text-[0.6rem] font-black tracking-widest text-slate-400 dark:text-white/30 uppercase";
+        badgeEl.className = "flex items-center gap-2 px-3 py-1 bg-slate-100 dark:bg-white/5 rounded-full border border-slate-200 dark:border-white/5";
+    }
 }
 
 function updateVBtnRects() {
@@ -129,27 +148,23 @@ function setupEventListeners() {
     });
 
     // Threshold Event Listeners (Standardized 0-1 Mapping)
-    els['match-threshold-input'].addEventListener('input', (e) => {
-        MATCH_SLIDER = parseFloat(e.target.value);
-        els['match-threshold-val'].innerText = MATCH_SLIDER.toFixed(2);
-        MATCH_THRESHOLD = 1.5 - (MATCH_SLIDER * 1.0);
-    });
-
-    els['shake-threshold-input'].addEventListener('input', (e) => {
-        SHAKE_SLIDER = parseFloat(e.target.value);
-        els['shake-threshold-val'].innerText = SHAKE_SLIDER.toFixed(2);
-        SHAKE_THRESHOLD = 0.05 + (SHAKE_SLIDER * 0.45);
-    });
-
-    els['conf-threshold-input'].addEventListener('input', (e) => {
-        CONFIDENCE_THRESHOLD = parseFloat(e.target.value);
-        els['conf-threshold-val'].innerText = CONFIDENCE_THRESHOLD.toFixed(2);
-    });
-
-    // Save config to server when user stops dragging
-    ['match-threshold-input', 'shake-threshold-input', 'conf-threshold-input'].forEach(id => {
-        els[id].addEventListener('change', saveConfig);
-    });
+    if (els['match-threshold-input']) {
+        els['match-threshold-input'].addEventListener('input', (e) => {
+            MATCH_SLIDER = parseFloat(e.target.value);
+            els['match-threshold-val'].innerText = MATCH_SLIDER.toFixed(2);
+            MATCH_THRESHOLD = 1.5 - (MATCH_SLIDER * 1.0);
+        });
+        // Save config to server when user stops dragging
+        els['match-threshold-input'].addEventListener('change', saveConfig);
+    }
+    
+    if (els['shake-threshold-input']) {
+        els['shake-threshold-input'].addEventListener('input', (e) => {
+            SHAKE_SLIDER = parseFloat(e.target.value);
+            els['shake-threshold-val'].innerText = SHAKE_SLIDER.toFixed(2);
+        });
+        els['shake-threshold-input'].addEventListener('change', saveConfig);
+    }
 
     // ContentEditable Sync
     els['word-buffer'].addEventListener('input', (e) => {
@@ -179,19 +194,8 @@ function setupEventListeners() {
 
     // Buffer Speaker
     els['speak-buffer-btn'].addEventListener('click', async () => {
-        if (!currentWord || currentWord === "-") return;
-        
-        try {
-            const res = await fetch('/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ gesture_name: currentWord })
-            });
-            const data = await res.json();
-            if (data.audio_base64) playAudio(data.audio_base64);
-        } catch (err) {
-            console.error("TTS Failed:", err);
-        }
+        sendToBackend();
+        triggerVBtnHaptic(els['speak-buffer-btn']);
     });
 }
 
@@ -471,16 +475,61 @@ function onResults(results) {
         checkVirtualCollisions(indexTip);
 
         if (bisindoModel) {
-            detectBisindoModel(results.multiHandWorldLandmarks, results.multiHandedness);
+            detectBisindoModel(results.multiHandWorldLandmarks, results.multiHandedness, activeHandIndex);
+            
+            // Check for Double Horn to Exit Sign Mode
+            if (isSignModeActive && results.multiHandWorldLandmarks.length === 2) {
+                const horn1 = detectInteractiveGestures(normalizeLandmarks(results.multiHandWorldLandmarks[0])) === "metal_horn";
+                const horn2 = detectInteractiveGestures(normalizeLandmarks(results.multiHandWorldLandmarks[1])) === "metal_horn";
+                
+                if (horn1 && horn2) {
+                    const now = Date.now();
+                    if (now - gestureDebounceTimer > GESTURE_DEBOUNCE) {
+                        console.log("🤘🤘 DOUBLE HORN detected: Exiting Sign Mode...");
+                        isSignModeActive = false;
+                        isGestureArmed = true; // Drop back to Armed state
+                        showNotification("Sign Mode: OFF 🛑");
+                        updateModeUI();
+                        gestureDebounceTimer = now;
+                    }
+                }
+            }
             
             // Handle Interactive Gestures (UI Control)
-            const gesture = detectInteractiveGestures(results.multiHandWorldLandmarks[activeHandIndex]);
+            // Fix: Normalize before detection to ensure scale-invariant thresholds
+            const normLandmarks = normalizeLandmarks(results.multiHandWorldLandmarks[activeHandIndex]);
+            const gesture = detectInteractiveGestures(normLandmarks);
             handleInteractiveActions(gesture);
+            
+            // Check for shake down if we have a pending prediction
+            if (pendingPrediction && isSignModeActive) {
+                if (detectShakeDown(activeHandIndex, results.multiHandLandmarks[activeHandIndex])) {
+                    console.log(`🫨 Shake Down confirmed! Adding: ${pendingPrediction}`);
+                    addLetterToBuffer(pendingPrediction);
+                    
+                    // Visual success feedback
+                    const centerX = results.multiHandLandmarks[activeHandIndex].reduce((s, l) => s + l.x, 0) / 21;
+                    const centerY = results.multiHandLandmarks[activeHandIndex].reduce((s, l) => s + l.y, 0) / 21;
+                    floatingPredictions.push({
+                        text: pendingPrediction,
+                        x: centerX,
+                        y: centerY,
+                        opacity: 1,
+                        life: 1.0
+                    });
+                    
+                    pendingPrediction = ""; // Clear pending
+                    
+                    // Extra cooldown to prevent immediate redetection
+                    lastLetterTime = Date.now();
+                }
+            }
         }
     } else {
         els['confidence-container'].classList.add('opacity-0', 'translate-y-4');
         if (els['virtual-cursor']) els['virtual-cursor'].style.opacity = "0";
         wristHistory = []; 
+        shakeHistory = [ [], [] ];
         resetVBtnState();
     }
 
@@ -618,27 +667,53 @@ function detectInteractiveGestures(landmarks) {
 
         const thumbTip = landmarks[4];
         const indexTip = landmarks[8];
+        const middleTip = landmarks[12];
+        const ringTip = landmarks[16];
         const pinkyTip = landmarks[20];
         const thumbMCP = landmarks[2];
 
-        const thumbIndexDist = getDist(thumbTip, indexTip);
-        const thumbPinkyDist = getDist(thumbTip, pinkyTip);
+        // 2. Open Palm (ARMING GESTURE)
+        // Check if all fingers are relatively extended and close to each other
+        const distancesFromWrist = [8, 12, 16, 20].map(idx => getDist(landmarks[idx], wrist));
+        const avgFingerDist = distancesFromWrist.reduce((a, b) => a + b, 0) / 4;
+        const isPalmOpen = avgFingerDist > 0.4; // Fingers extended away from wrist
+        
+        // Check if index, middle, ring, pinky are close together (rapat)
+        const spread = getDist(landmarks[8], landmarks[20]); 
+        const isHandFlat = isPalmOpen && (spread < 0.3);
 
-        // FIST: Thumb is relatively close to index and pinky (curled in)
-        // Relaxed from 0.25/0.35 to 0.45 for better reliability
-        if (thumbIndexDist < 0.45 && thumbPinkyDist < 0.55) {
+        if (isHandFlat) {
+            return "open_palm";
+        }
+
+        // 3. Finger States (Extended vs Curled) using relative distances
+        // A finger is extended if its tip is further from the wrist than its PIP joint
+        const isIndexExt = getDist(indexTip, wrist) > getDist(landmarks[6], wrist);
+        const isMiddleExt = getDist(middleTip, wrist) > getDist(landmarks[10], wrist);
+        const isRingExt = getDist(ringTip, wrist) > getDist(landmarks[14], wrist);
+        const isPinkyExt = getDist(pinkyTip, wrist) > getDist(landmarks[18], wrist);
+
+        // Thumb is extended if its tip is significantly far from the palm center (landmark 9)
+        const isThumbExt = getDist(thumbTip, landmarks[9]) > 0.35;
+
+        // CALL SIGN (Listen): Thumb & Pinky Extended, Index/Middle/Ring Curled
+        if (isThumbExt && isPinkyExt && !isIndexExt && !isMiddleExt && !isRingExt) {
+            return "call_sign";
+        }
+
+        // METAL/HORN (Reset): Index & Pinky Extended, Thumb/Middle/Ring Curled
+        if (isIndexExt && isPinkyExt && !isMiddleExt && !isRingExt && !isThumbExt) {
+            return "metal_horn";
+        }
+
+        // FIST (Sign Mode Toggle): All fingers completely curled
+        if (!isIndexExt && !isMiddleExt && !isRingExt && !isPinkyExt && !isThumbExt) {
             return "fist";
         }
 
-        // THUMBS UP: Thumb tip is above Thumb MCP (Y is negative up)
-        // Relaxed Y threshold further to 0.12 for easier detection
-        if (thumbTip.y < thumbMCP.y - 0.12) {
-            return "thumbs_up";
-        }
-
-        // THUMBS DOWN: Thumb tip is below Thumb MCP
-        // Relaxed Y threshold further to 0.12
-        if (thumbTip.y > thumbMCP.y + 0.12) {
+        // THUMBS DOWN (Backspace): Thumb tip is physically pointing down relative to MCP
+        // y is positive downwards, so tip.y > MCP.y means pointing down
+        if (thumbTip.y > thumbMCP.y + 0.1 && !isIndexExt && !isMiddleExt && !isRingExt && !isPinkyExt) {
             return "thumbs_down";
         }
 
@@ -650,6 +725,15 @@ function detectInteractiveGestures(landmarks) {
 }
 
 function handleInteractiveActions(gesture) {
+    const cursorRing = els['virtual-cursor']?.firstElementChild;
+    
+    // Update visual feedback for Armed state
+    if (isGestureArmed) {
+        if (cursorRing) cursorRing.classList.add('animate-pulse', 'border-primary-500');
+    } else {
+        if (cursorRing) cursorRing.classList.remove('animate-pulse');
+    }
+
     if (gesture === "none" || gesture === lastInteractiveGesture) {
         if (gesture === "none") lastInteractiveGesture = "none";
         return;
@@ -658,159 +742,201 @@ function handleInteractiveActions(gesture) {
     const now = Date.now();
     if (now - gestureDebounceTimer < GESTURE_DEBOUNCE) return;
 
-    // Trigger actions based on gesture
-    if (gesture === "fist") {
-        if (!currentWord || currentWord === "-") {
-            // console.log("✊ Fist detected, but buffer is empty. Skipping.");
-            return;
+    // ARMING LOGIC: Show open palm to arm
+    if (gesture === "open_palm") {
+        if (!isGestureArmed) {
+            console.log("🖐️ SUCCESS: Hand Armed! Ready for command...");
+            isGestureArmed = true;
+            showNotification("System Armed 🖐️ (Commands Enabled)");
+            
+            // Visual pulse feedback
+            if (cursorRing) cursorRing.classList.add('scale-150');
+            setTimeout(() => cursorRing.classList.remove('scale-150'), 300);
+            updateModeUI();
         }
-        console.log("✊ Fist detected: Translating...");
-        els['translate-btn'].click();
-        triggerVBtnHaptic(els['translate-btn']);
-    } else if (gesture === "thumbs_up") {
-        console.log("👍 Thumbs Up detected: Resetting...");
+        lastInteractiveGesture = "open_palm";
+        gestureDebounceTimer = now;
+        return;
+    }
+
+    // GATED COMMANDS: Only work if armed
+    if (!isGestureArmed) return;
+
+    // Trigger actions based on gesture
+    let actionTriggered = false;
+
+    if (gesture === "fist") {
+        console.log("✊ Fist detected: Enabling Sign Mode...");
+        isSignModeActive = true;
+        showNotification("Sign Mode: ACTIVE ✍️");
+        actionTriggered = true;
+    } else if (gesture === "call_sign") {
+        if (currentWord && currentWord !== "-") {
+            console.log("🤙 Call Sign detected: Listening...");
+            showNotification("Listening... 🔊");
+            els['translate-btn'].click();
+            triggerVBtnHaptic(els['translate-btn']);
+            actionTriggered = true;
+        }
+    } else if (gesture === "metal_horn") {
+        console.log("🤘 Metal/Horn detected: Resetting...");
+        showNotification("Clearing Buffer... 🧹");
         els['clear-buffer-btn'].click();
         triggerVBtnHaptic(els['clear-buffer-btn']);
+        actionTriggered = true;
     } else if (gesture === "thumbs_down") {
         console.log("👎 Thumbs Down detected: Backspace...");
+        showNotification("Backspace ⌫");
         els['backspace-btn'].click();
         triggerVBtnHaptic(els['backspace-btn']);
+        actionTriggered = true;
     }
 
-    lastInteractiveGesture = gesture;
-    gestureDebounceTimer = now;
+    if (actionTriggered) {
+        // If we didn't just activate Sign Mode, lock it
+        if (!isSignModeActive) {
+            isGestureArmed = false; 
+        }
+        updateModeUI();
+        lastInteractiveGesture = gesture;
+        gestureDebounceTimer = now;
+    }
 }
 
-function calculateDistance(l1, l2) {
-    let sum = 0;
-    for (let i = 0; i < 21; i++) {
-        sum += Math.sqrt(
-            Math.pow(l1[i].x - l2[i].x, 2) +
-            Math.pow(l1[i].y - l2[i].y, 2) +
-            Math.pow(l1[i].z - l2[i].z, 2)
+/**
+ * Detects if the hand has been still for a set duration (Dwell).
+ */
+function detectDwell(handIdx, landmarks) {
+    if (!wristHistory[handIdx]) wristHistory[handIdx] = [];
+    
+    const wrist = landmarks[0];
+    const now = Date.now();
+    wristHistory[handIdx].push({ x: wrist.x, y: wrist.y, t: now });
+    
+    // Maintain a window of ~0.8 seconds (at 30fps = 24 frames)
+    if (wristHistory[handIdx].length > 24) wristHistory[handIdx].shift();
+    if (wristHistory[handIdx].length < 18) return false;
+
+    // Calculate total movement in the window
+    let totalDisp = 0;
+    for (let i = 1; i < wristHistory[handIdx].length; i++) {
+        totalDisp += Math.sqrt(
+            Math.pow(wristHistory[handIdx][i].x - wristHistory[handIdx][i-1].x, 2) +
+            Math.pow(wristHistory[handIdx][i].y - wristHistory[handIdx][i-1].y, 2)
         );
     }
-    return sum / 21;
+
+    // Stillness threshold: total movement < 0.15m over 1s region
+    // AND the last letter wasn't too recent
+    const isStill = totalDisp < 0.12; 
+    const timeSinceLast = now - lastLetterTime;
+
+    return isStill && timeSinceLast > LETTER_COOLDOWN;
 }
 
-function detectBisindoModel(multiWorldLandmarks, multiHandedness) {
-    if (!bisindoModel || !multiWorldLandmarks) return;
+function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandIndex) {
+    if (!multiWorldLandmarks || multiWorldLandmarks.length === 0) return;
+    // Gate with Sign Mode
+    if (!isSignModeActive) return;
 
-    // 1. Shake Detection logic
-    let maxHandDisplacement = 0;
-    multiWorldLandmarks.forEach((landmarks, handIdx) => {
-        const wrist = landmarks[0];
-        if (!wristHistory[handIdx]) wristHistory[handIdx] = [];
-        wristHistory[handIdx].push({x: wrist.x, y: wrist.y});
-        if (wristHistory[handIdx].length > SHAKE_WINDOW) wristHistory[handIdx].shift();
+    const landmarks = multiWorldLandmarks[activeHandIndex];
+    const isStill = detectDwell(activeHandIndex, landmarks);
 
-        if (wristHistory[handIdx].length === SHAKE_WINDOW) {
-            let displacement = 0;
-            for (let i = 1; i < wristHistory[handIdx].length; i++) {
-                displacement += Math.sqrt(
-                    Math.pow(wristHistory[handIdx][i].x - wristHistory[handIdx][i-1].x, 2) +
-                    Math.pow(wristHistory[handIdx][i].y - wristHistory[handIdx][i-1].y, 2)
-                );
-            }
-            maxHandDisplacement = Math.max(maxHandDisplacement, displacement);
-        }
-    });
+    if (!isStill) return;
 
-    const isShaking = maxHandDisplacement > SHAKE_THRESHOLD;
-    if (els['shake-indicator']) {
-        els['shake-indicator'].style.opacity = isShaking ? "1" : "0";
-    }
+    // AI Prediction Triggered by Dwell!
+    console.log("⏳ Dwell detected! Asking AI for prediction...");
+    
+    // UI Feedback
+    els['confidence-container']?.classList.remove('opacity-0');
+    els['best-match-display'].innerText = "Menganalisis...";
+    
+    // In Sign Mode, we DON'T lock it so they can keep signing.
+    // We just debounce via LETTER_COOLDOWN in detectDwell.
 
-    if (activeVBtn) return;
-
-    // 2. KNN Sign Detection
-    let bestMatch = null;
-    let minScore = Infinity;
-    const K = 3; 
-
-    const currentHands = multiHandedness.map((h, i) => ({
-        label: h.label.toLowerCase(),
-        landmarks: normalizeLandmarks(multiWorldLandmarks[i])
-    }));
-
-    if (currentHands.length === 0) return;
-
-    // Flatten all samples from all labels for comparison
-    const neighbors = [];
-    for (const [label, samples] of Object.entries(bisindoModel)) {
-        samples.forEach(sample => {
-            // Find current hand with same handedness
-            const hand = currentHands.find(h => h.label === sample.handedness);
-            if (hand) {
-                const dist = calculateDistance(hand.landmarks, sample.landmarks);
-                neighbors.push({ label, dist });
-            }
-        });
-    }
-
-    if (neighbors.length > 0) {
-        neighbors.sort((a, b) => a.dist - b.dist);
-        const topK = neighbors.slice(0, K);
-        
-        // Weighted voting
-        const votes = {};
-        topK.forEach(n => {
-            const weight = 1 / (n.dist + 0.001);
-            votes[n.label] = (votes[n.label] || 0) + weight;
-        });
-
-        let winner = null;
-        let maxVotes = 0;
-        for (const [lbl, v] of Object.entries(votes)) {
-            if (v > maxVotes) {
-                maxVotes = v;
-                winner = lbl;
-            }
-        }
-
-        minScore = topK[0].dist; // Use closest neighbor for confidence
-        bestMatch = winner;
-    }
-
-    // 3. Update UI and Handle Shake Triggers
-    const HUD_THRESHOLD = MATCH_THRESHOLD * 1.5;
-    if (bestMatch && minScore < HUD_THRESHOLD) { 
-        const confidence = Math.max(0, Math.min(100, Math.round((1 - minScore / HUD_THRESHOLD) * 100)));
-        
-        // Only show HUD if confidence exceeds user-set threshold
-        if (confidence >= CONFIDENCE_THRESHOLD * 100) {
-            els['confidence-container'].classList.remove('opacity-0', 'translate-y-4');
-            els['confidence-bar'].style.width = `${confidence}%`;
-            els['confidence-value'].innerText = `${confidence}%`;
-            els['best-match-display'].innerText = bestMatch;
-        } else {
-            els['confidence-container'].classList.add('opacity-0', 'translate-y-4');
-        }
-        
-        // Match threshold for "locking" is tighter than just seeing it on HUD
-        if (isShaking && minScore < MATCH_THRESHOLD) {
-            const now = Date.now();
-            if (now - lastLetterTime > LETTER_COOLDOWN || lastLetterDetected !== bestMatch) {
-                addLetterToBuffer(bestMatch);
-                
-                // Visual feedback for locking
-                const centerX = multiWorldLandmarks[0].reduce((s, l) => s + l.x, 0) / 21;
-                const centerY = multiWorldLandmarks[0].reduce((s, l) => s + l.y, 0) / 21;
-                floatingPredictions.push({
-                    text: bestMatch,
-                    x: centerX,
-                    y: centerY,
-                    opacity: 1.0,
-                    isLocking: true
+    fetch('/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            gesture_name: "current_frame",
+            landmarks: landmarks
+        })
+    })
+    .then(res => res.json())
+    .then(data => {
+        const char = data.prediction;
+        if (char && char !== "?") {
+            console.log(`✅ AI Predicted: ${char}. Waiting for Shake Down confirmation...`);
+            pendingPrediction = char;
+            // Gunakan inline HTML untuk menyisipkan ikon Lucide dengan animasi bouncing
+            els['best-match-display'].innerHTML = `${char} <i data-lucide="arrow-down-to-line" class="inline-block w-8 h-8 text-amber-500 animate-bounce ml-2"></i>`; 
+            // Refresh lucide icons pada elemen yang baru ditambahkan
+            if (window.lucide) {
+                window.lucide.createIcons({
+                    root: els['confidence-container']
                 });
-                lastLetterDetected = bestMatch;
-                lastLetterTime = now;
             }
+        } else {
+            console.warn("⚠️ AI could not determine the sign.");
+            els['best-match-display'].innerText = "?";
+            pendingPrediction = "";
         }
-    } else {
-        els['confidence-container'].classList.add('opacity-0', 'translate-y-4');
-    }
+        
+        lastLetterTime = Date.now();
+        setTimeout(() => {
+            // Only hide if we aren't waiting for a shake confirmation
+            if (!pendingPrediction) {
+                els['confidence-container']?.classList.add('opacity-0');
+            }
+        }, 1500);
+    })
+    .catch(err => {
+        console.error("Prediction Error:", err);
+        els['best-match-display'].innerText = "Err";
+        pendingPrediction = "";
+    });
 }
+
+/**
+ * Detects a quick downward shake movement (Shake Down) to confirm an action.
+ * Uses MediaPipe landmarks natively.
+ */
+function detectShakeDown(handIdx, landmarks) {
+    if (!shakeHistory[handIdx]) shakeHistory[handIdx] = [];
+    
+    // We use Screen Space landmarks (multiHandLandmarks) for shake detection
+    // because it correlates better with user's visual action.
+    // y goes from 0 (top) to 1 (bottom)
+    const wrist = landmarks[0];
+    const now = Date.now();
+    shakeHistory[handIdx].push({ y: wrist.y, t: now });
+    
+    // Maintain a window of ~15 frames (0.5 seconds at 30fps)
+    if (shakeHistory[handIdx].length > 15) shakeHistory[handIdx].shift();
+    if (shakeHistory[handIdx].length < 5) return false;
+
+    const history = shakeHistory[handIdx];
+    const firstPoint = history[0];
+    const latestPoint = history[history.length - 1];
+    
+    // Configurable shake velocity threshold
+    // Using SHAKE_SLIDER: larger value (close to 1.0) means easier to trigger (smaller threshold)
+    // smaller value (close to 0.0) means harder to trigger (larger threshold)
+    const dropVelocityThreshold = 0.15 - (SHAKE_SLIDER * 0.10); // range from 0.15 (hard) to 0.05 (easy)
+
+    // Condition: Y must increase significantly (downward motion) in a short time
+    const yDiff = latestPoint.y - firstPoint.y;
+    const timeDiffMs = latestPoint.t - firstPoint.t;
+    
+    if (timeDiffMs > 0 && yDiff > dropVelocityThreshold) {
+        // Clear history to prevent multiple triggers from same shake
+        shakeHistory[handIdx] = [];
+        return true;
+    }
+
+    return false;
+}
+
 
 function addLetterToBuffer(letter) {
     if (currentWord === "-" || currentWord === "") currentWord = "";
@@ -819,15 +945,63 @@ function addLetterToBuffer(letter) {
 }
 
 /**
+ * Displays a temporary notification in the HUD
+ * @param {string} message - Notification text
+ * @param {string} type - 'info' or 'success'
+ */
+function showNotification(message, type = 'info') {
+    const container = els['ai-notification-container'];
+    if (!container) return;
+
+    const notification = document.createElement('div');
+    notification.className = `
+        px-6 py-3 rounded-2xl bg-white/10 dark:bg-black/40 backdrop-blur-2xl border border-white/20 
+        text-[0.65rem] font-bold text-slate-800 dark:text-white uppercase tracking-[0.2em]
+        flex items-center gap-3 shadow-2xl animate-notification-in transition-all duration-500
+    `;
+    
+    // Icon based on content
+    let icon = 'info';
+    if (message.includes('Armed')) icon = 'shield-check';
+    if (message.includes('ACTIVE')) icon = 'zap';
+    if (message.includes('Listening')) icon = 'volume-2';
+    if (message.includes('Clearing')) icon = 'trash-2';
+    if (message.includes('Backspace')) icon = 'delete';
+
+    notification.innerHTML = `
+        <i data-lucide="${icon}" class="w-3.5 h-3.5 text-primary-400"></i>
+        <span>${message}</span>
+    `;
+
+    container.appendChild(notification);
+    
+    // Refresh lucide icons
+    if (window.lucide) {
+        window.lucide.createIcons({
+            attrs: { class: 'w-3.5 h-3.5' },
+            nameAttr: 'data-lucide'
+        });
+    }
+
+    // Auto remove
+    setTimeout(() => {
+        notification.classList.add('opacity-0', '-translate-y-4');
+        setTimeout(() => notification.remove(), 500);
+    }, 2500);
+}
+
+/**
  * Updates the Word Buffer UI with dynamic font scaling and auto-scroll
  * @param {boolean} updateText - Whether to update the innerText (false for manual edits)
+ * @param {boolean} setCaretAtEnd - Whether to force the caret to the end
  */
-function updateBufferUI(updateText = true) {
+function updateBufferUI(updateText = true, setCaretAtEnd = true) {
     const buffer = els['word-buffer'];
     const container = els['word-buffer-container'];
     
     if (updateText) {
         buffer.innerText = currentWord || "-";
+        if (setCaretAtEnd && currentWord) placeCaretAtEnd(buffer);
     }
 
     const length = currentWord.length;
@@ -852,6 +1026,18 @@ function updateBufferUI(updateText = true) {
     setTimeout(() => buffer.classList.remove('scale-105', 'text-primary-400'), 200);
 }
 
+function placeCaretAtEnd(el) {
+    el.focus();
+    if (typeof window.getSelection != "undefined" && typeof document.createRange != "undefined") {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+    }
+}
+
 /**
  * Fetches threshold configuration from the backend
  */
@@ -861,22 +1047,18 @@ async function fetchConfig() {
         const data = await response.json();
         
         // Update Sliders
-        els['match-threshold-input'].value = data.match;
-        els['shake-threshold-input'].value = data.shake;
-        els['conf-threshold-input'].value = data.confidence;
+        if (els['match-threshold-input']) {
+            els['match-threshold-input'].value = data.match;
+            els['match-threshold-val'].innerText = parseFloat(data.match).toFixed(2);
+            MATCH_SLIDER = data.match;
+            MATCH_THRESHOLD = 1.5 - (MATCH_SLIDER * 1.0);
+        }
         
-        // Trigger UI updates
-        els['match-threshold-val'].innerText = parseFloat(data.match).toFixed(2);
-        els['shake-threshold-val'].innerText = parseFloat(data.shake).toFixed(2);
-        els['conf-threshold-val'].innerText = parseFloat(data.confidence).toFixed(2);
-        
-        // Apply internal mapping
-        MATCH_SLIDER = data.match;
-        SHAKE_SLIDER = data.shake;
-        CONFIDENCE_THRESHOLD = data.confidence;
-        
-        MATCH_THRESHOLD = 1.5 - (MATCH_SLIDER * 1.0);
-        SHAKE_THRESHOLD = 0.05 + (SHAKE_SLIDER * 0.45);
+        if (els['shake-threshold-input']) {
+            els['shake-threshold-input'].value = data.shake;
+            els['shake-threshold-val'].innerText = parseFloat(data.shake).toFixed(2);
+            SHAKE_SLIDER = data.shake;
+        }
         
     } catch (e) {
         console.error("Failed to fetch config:", e);
@@ -894,7 +1076,7 @@ async function saveConfig() {
             body: JSON.stringify({
                 match: MATCH_SLIDER,
                 shake: SHAKE_SLIDER,
-                confidence: CONFIDENCE_THRESHOLD
+                confidence: 0.5 // Obsolete but kept for retrocompatibility with config.ini
             })
         });
     } catch (e) {
@@ -905,8 +1087,7 @@ async function saveConfig() {
 async function sendToBackend() {
     if (!currentWord || currentWord === "-") return;
     
-    updateStatus('processing', 'Menerjemahkan...');
-    
+    // We only trigger audio generation, no "Translating" status needed
     try {
         const response = await fetch('/translate', {
             method: 'POST',
@@ -917,10 +1098,7 @@ async function sendToBackend() {
         const data = await response.json();
         
         if (data.translated_text) {
-            // Show Notification
-            showNotification(data.translated_text, data.audio_base64);
-            
-            // Add to History
+            // Add to History silently
             const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             translationHistory.unshift({
                 text: data.translated_text,
@@ -931,11 +1109,10 @@ async function sendToBackend() {
         }
         
         lastAudioBase64 = data.audio_base64;
-        updateStatus('active', 'Terjemahan Selesai');
+        if (data.audio_base64) playAudio(data.audio_base64);
         
     } catch (error) {
-        console.error("Translation Error:", error);
-        updateStatus('idle', 'Gagal Menerjemahkan');
+        console.error("TTS Error:", error);
     }
 }
 
