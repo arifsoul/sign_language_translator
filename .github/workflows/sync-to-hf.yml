@@ -27,6 +27,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config lfs.allowincompletepush true
+          git config lfs.allowincompletepush || true
           git remote rm origin || true
           git push https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main  
