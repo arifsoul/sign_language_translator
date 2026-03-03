@@ -11,6 +11,10 @@ let floatingPredictions = [];
 let translationHistory = []; // { text, audio, timestamp }
 let shakeHistory = [ [], [] ]; // array of wrist points for each hand to detect shake
 let pendingPrediction = ""; // the character predicted by AI waiting for confirmation
+let currentContinuousPrediction = ""; // Current raw prediction from backend
+let continuousPredictionStartTime = 0; // Timestamp when currentContinuousPrediction started
+let isWaitingForShake = false; // Flag to indicate we are stabilized and waiting for shake
+let isFetchingPrediction = false; // Prevent overlapping API calls
 
 // Active Interaction State
 let virtualButtons = [];
@@ -501,7 +505,7 @@ function onResults(results) {
             const gesture = detectInteractiveGestures(normLandmarks);
             handleInteractiveActions(gesture);
             
-            // Check for shake down if we have a pending prediction
+            // Check for shake down if we have any pending prediction (don't wait for 1s stabilization if user is fast)
             if (pendingPrediction && isSignModeActive) {
                 if (detectShakeDown(activeHandIndex, results.multiHandLandmarks[activeHandIndex])) {
                     console.log(`🫨 Shake Down confirmed! Adding: ${pendingPrediction}`);
@@ -519,6 +523,10 @@ function onResults(results) {
                     });
                     
                     pendingPrediction = ""; // Clear pending
+                    isWaitingForShake = false;
+                    currentContinuousPrediction = ""; // Reset continuous tracking so we start fresh
+                    els['best-match-display'].innerText = "-";
+                    els['confidence-container']?.classList.add('opacity-0');
                     
                     // Extra cooldown to prevent immediate redetection
                     lastLetterTime = Date.now();
@@ -530,6 +538,9 @@ function onResults(results) {
         if (els['virtual-cursor']) els['virtual-cursor'].style.opacity = "0";
         wristHistory = []; 
         shakeHistory = [ [], [] ];
+        pendingPrediction = "";
+        isWaitingForShake = false;
+        currentContinuousPrediction = "";
         resetVBtnState();
     }
 
@@ -837,22 +848,24 @@ function detectDwell(handIdx, landmarks) {
 function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandIndex) {
     if (!multiWorldLandmarks || multiWorldLandmarks.length === 0) return;
     // Gate with Sign Mode
-    if (!isSignModeActive) return;
+    if (!isSignModeActive) {
+        // Reset tracking vars if exiting sign mode
+        currentContinuousPrediction = "";
+        isWaitingForShake = false;
+        pendingPrediction = "";
+        return;
+    }
+    
+    // Check if we are recently hit cooldown from a successful letter confirmation
+    if (Date.now() - lastLetterTime < LETTER_COOLDOWN) return;
+
+    // We don't need Dwell anymore, we predict constantly
+    // But we prevent overlapping fetch calls
+    if (isFetchingPrediction) return;
 
     const landmarks = multiWorldLandmarks[activeHandIndex];
-    const isStill = detectDwell(activeHandIndex, landmarks);
 
-    if (!isStill) return;
-
-    // AI Prediction Triggered by Dwell!
-    console.log("⏳ Dwell detected! Asking AI for prediction...");
-    
-    // UI Feedback
-    els['confidence-container']?.classList.remove('opacity-0');
-    els['best-match-display'].innerText = "Menganalisis...";
-    
-    // In Sign Mode, we DON'T lock it so they can keep signing.
-    // We just debounce via LETTER_COOLDOWN in detectDwell.
+    isFetchingPrediction = true;
 
     fetch('/predict', {
         method: 'POST',
@@ -864,35 +877,64 @@ function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandInde
     })
     .then(res => res.json())
     .then(data => {
+        isFetchingPrediction = false;
         const char = data.prediction;
-        if (char && char !== "?") {
-            console.log(`✅ AI Predicted: ${char}. Waiting for Shake Down confirmation...`);
-            pendingPrediction = char;
-            // Gunakan inline HTML untuk menyisipkan ikon Lucide dengan animasi bouncing
-            els['best-match-display'].innerHTML = `${char} <i data-lucide="arrow-down-to-line" class="inline-block w-8 h-8 text-amber-500 animate-bounce ml-2"></i>`; 
-            // Refresh lucide icons pada elemen yang baru ditambahkan
-            if (window.lucide) {
-                window.lucide.createIcons({
-                    root: els['confidence-container']
-                });
-            }
-        } else {
-            console.warn("⚠️ AI could not determine the sign.");
-            els['best-match-display'].innerText = "?";
-            pendingPrediction = "";
-        }
         
-        lastLetterTime = Date.now();
-        setTimeout(() => {
-            // Only hide if we aren't waiting for a shake confirmation
-            if (!pendingPrediction) {
-                els['confidence-container']?.classList.add('opacity-0');
+        if (char && char !== "?") {
+            els['confidence-container']?.classList.remove('opacity-0');
+            
+            // Logika Kontinu (selalu memperbarui pendingPrediction secara default)
+            pendingPrediction = char; // Selalu perbarui agar Shake siap kapan saja
+            
+            if (char === currentContinuousPrediction) {
+                // Huruf stabil (sama). Cek durasinya.
+                const duration = Date.now() - continuousPredictionStartTime;
+                
+                if (duration > 1000 && !isWaitingForShake) {
+                    // Berhasil stabil lebih dari 1 detik!
+                    console.log(`✅ AI Stabilized on: ${char}. Showing Shake Down arrow...`);
+                    isWaitingForShake = true;
+                    
+                    // Ubah UI tampilkan animasi lucide
+                    els['best-match-display'].innerHTML = `${char} <i data-lucide="arrow-down-to-line" class="inline-block w-8 h-8 text-amber-500 animate-bounce ml-2"></i>`; 
+                    if (window.lucide) {
+                        window.lucide.createIcons({
+                            root: els['confidence-container']
+                        });
+                    }
+                } else if (!isWaitingForShake) {
+                    // Masih loading 1 detik, tapi kita tetap tunjukkan char
+                    els['best-match-display'].innerText = char;
+                }
+            } else {
+                // Prediksi berganti/fluktuatif. Reset timer stabilisasi.
+                currentContinuousPrediction = char;
+                continuousPredictionStartTime = Date.now();
+                isWaitingForShake = false;
+                els['best-match-display'].innerText = char; // Tampilkan real-time tebakan langsung
             }
-        }, 1500);
+            
+        } else {
+            // Prediksi hilang atau "?", reset stabilisasi
+            currentContinuousPrediction = "";
+            isWaitingForShake = false;
+            pendingPrediction = "";
+            els['best-match-display'].innerText = "-";
+            
+            // Sembunyikan container jika tidak ada deteksi konstan sesaat
+            setTimeout(() => {
+                if (!currentContinuousPrediction) {
+                    els['confidence-container']?.classList.add('opacity-0');
+                }
+            }, 500);
+        }
     })
     .catch(err => {
+        isFetchingPrediction = false;
         console.error("Prediction Error:", err);
         els['best-match-display'].innerText = "Err";
+        currentContinuousPrediction = "";
+        isWaitingForShake = false;
         pendingPrediction = "";
     });
 }

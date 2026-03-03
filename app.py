@@ -31,16 +31,9 @@ try:
         
         for key, samples in model_data.items():
             if not samples: continue
-            n = len(samples)
-            avg_landmarks = [{"x": 0, "y": 0, "z": 0} for _ in range(21)]
-            for sample in samples:
-                lms = sample.get("landmarks", [])
-                for i in range(21):
-                    if i < len(lms):
-                        avg_landmarks[i]["x"] += lms[i].get("x", 0) / n
-                        avg_landmarks[i]["y"] += lms[i].get("y", 0) / n
-                        avg_landmarks[i]["z"] += lms[i].get("z", 0) / n
-            PROTOTYPES[key] = avg_landmarks
+            # We no longer calculate an "average" prototype here because averaging 
+            # rotated hands creates distorted centroids. We load all 20 variations.
+            PROTOTYPES[key] = samples
             
 except Exception as e:
     print(f"⚠️ Error loading model vocab/prototypes: {e}")
@@ -164,37 +157,42 @@ async def predict_sign(data: GestureData):
         best_match_key = "?"
         best_dist = float('inf')
         
-        for key, lms in PROTOTYPES.items():
-            if not lms or len(lms) < 21: continue
-            
-            p0 = lms[0]
-            centered_p = []
-            max_dist_p = 0.0
-            for pt in lms:
-                dx = pt["x"] - p0["x"]
-                dy = pt["y"] - p0["y"]
-                dz = pt["z"] - p0["z"]
-                centered_p.append({"x": dx, "y": dy, "z": dz})
-                dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                if dist > max_dist_p: max_dist_p = dist
+        for key, variations in PROTOTYPES.items():
+            if not isinstance(variations, list) or len(variations) == 0:
+                continue
                 
-            if max_dist_p == 0: max_dist_p = 1.0
-            
-            rel_p = [{"x": p["x"]/max_dist_p, "y": p["y"]/max_dist_p, "z": p["z"]/max_dist_p} for p in centered_p]
-            
-            # Hitung jarak rata-rata Euclidean
-            dist = 0
-            for i in range(21):
-                dist += math.sqrt(
-                    (rel_input[i]["x"] - rel_p[i]["x"])**2 +
-                    (rel_input[i]["y"] - rel_p[i]["y"])**2 +
-                    (rel_input[i]["z"] - rel_p[i]["z"])**2
-                )
-            avg_dist = dist / 21.0
-            
-            if avg_dist < best_dist:
-                best_dist = avg_dist
-                best_match_key = key
+            # Cek format dictionary dan ekstrak list of landmarks yang sesuai
+            samples = []
+            if isinstance(variations[0], dict):
+                if "landmarks" in variations[0]:
+                    # Format baru (trainer.py / augmented.py): [{"handedness": "...", "landmarks": [...]}, ...]
+                    samples = [v["landmarks"] for v in variations if "landmarks" in v]
+                elif "x" in variations[0]:
+                    # Format sangat lama: langsung list of 21 dict points
+                    samples = [variations]
+            elif isinstance(variations[0], list):
+                # Format augmented lama: list of lists of dict points
+                samples = variations
+                
+            for lms in samples:
+                if not lms or len(lms) < 21: continue
+                
+                # Kita asumsikan lms sudah dinormalisasi oleh script augmentasi!
+                # Tapi untuk double check dan konsistensi, kita hitung jarak langsung 
+                # karena frontend juga sudah menormalisasinya dengan cara yang sama.
+                
+                dist = 0
+                for i in range(21):
+                    dist += math.sqrt(
+                        (rel_input[i]["x"] - lms[i]["x"])**2 +
+                        (rel_input[i]["y"] - lms[i]["y"])**2 +
+                        (rel_input[i]["z"] - (lms[i].get("z", 0)))**2
+                    )
+                avg_dist = dist / 21.0
+                
+                if avg_dist < best_dist:
+                    best_dist = avg_dist
+                    best_match_key = key
                 
         # 3. Evaluasi terhadap Threshold Konfigurasi
         # match_slider dari UI bernilai 0.0 - 1.0. Makin besar (e.g 1.0) artinya AI harus makin strict/yakin.

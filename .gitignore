@@ -1,3 +1,7 @@
 .env
 .venv
 .history
+__pycache__
+*.pyc
+*.pyo
+*.pyd
