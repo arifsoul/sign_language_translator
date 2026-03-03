@@ -27,4 +27,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          hf upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
+          git config lfs.allowincompletepush true
+          git remote rm origin || true
+          git push --force https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main
