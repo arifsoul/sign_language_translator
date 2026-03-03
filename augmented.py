@@ -23,7 +23,7 @@ DATASET_DIR = "bisindo_dataset"
 MODEL_FILE = "bisindo_model.json"
 
 # Augmentation Configuration
-NUM_VARIATIONS = 20        # Includes the original (e.g., 20 means 1 original + 19 augmented)
+NUM_VARIATIONS = 50        # Includes the original (e.g., 20 means 1 original + 19 augmented)
 GUARANTEE_MIRROR = True    # Ensure at least one variation is a horizontally flipped (mirrored) version
 
 # Ranges for randomization

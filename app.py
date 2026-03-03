@@ -220,6 +220,19 @@ async def predict_sign(data: GestureData):
 # Serving index.html on root '/' by setting html=True and mounting at '/'
 app.mount("/", StaticFiles(directory=".", html=True), name="static")
 
+import threading
+import webbrowser
+import time
+
+def open_browser():
+    # Wait a brief moment to ensure Uvicorn is up and running
+    time.sleep(1.5)
+    webbrowser.open("http://localhost:8000")
+
 if __name__ == "__main__":
     print("\n🚀 Starting Sign Language Translator at http://localhost:8000\n")
+    
+    # Start the browser-opening thread before blocking the main thread with uvicorn
+    threading.Thread(target=open_browser, daemon=True).start()
+    
     uvicorn.run(app, host="0.0.0.0", port=8000)

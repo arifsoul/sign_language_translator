@@ -728,6 +728,11 @@ function detectInteractiveGestures(landmarks) {
             return "thumbs_down";
         }
 
+        // ILY / I LOVE YOU (Space): Thumb, Index, Pinky Extended. Middle, Ring Curled.
+        if (isThumbExt && isIndexExt && isPinkyExt && !isMiddleExt && !isRingExt) {
+            return "ily";
+        }
+
         return "none";
     } catch (e) {
         console.error("Gesture detection error:", e);
@@ -801,6 +806,18 @@ function handleInteractiveActions(gesture) {
         els['backspace-btn'].click();
         triggerVBtnHaptic(els['backspace-btn']);
         actionTriggered = true;
+    } else if (gesture === "ily" && isSignModeActive) {
+        console.log("🤟 ILY detected: Adding Space...");
+        showNotification("Space ␣");
+        addLetterToBuffer(" ");
+        actionTriggered = true;
+        
+        // Add minimal visual feedback on the cursor
+        const cursorRing = els['virtual-cursor']?.firstElementChild;
+        if (cursorRing) {
+            cursorRing.classList.add('scale-150', 'bg-primary-500/20');
+            setTimeout(() => cursorRing.classList.remove('scale-150', 'bg-primary-500/20'), 300);
+        }
     }
 
     if (actionTriggered) {
