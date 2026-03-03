@@ -20,10 +20,11 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Install Hugging Face Hub CLI
+        run: pip install -U "huggingface_hub[cli]"
+
       - name: Upload Repo to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config lfs.allowincompletepush || true
-          git remote rm origin || true
-          git push https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main  
+          huggingface-cli upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"  
