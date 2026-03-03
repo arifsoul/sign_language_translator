@@ -1,9 +1,9 @@
-name: Sync to Hugging Face Hub
-
+name: Sync to Hugging Face hub
 on:
   push:
-    branches: [main, master]
+    branches: [main]
 
+  # to run this workflow manually from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -12,22 +12,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           lfs: true
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Install Hugging Face Hub
-        run: pip install -U huggingface_hub
-      
-      - name: Update PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-      
-      - name: Upload Repo to Hugging Face Space
+      - name: Push to hub
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          hf upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
+        run: git push https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main
