@@ -27,4 +27,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python -c "from huggingface_hub import HfApi; import os; api = HfApi(token=os.environ.get('HF_TOKEN')); api.upload_folder(folder_path='.', repo_id='arifsoul/sign_language_translator', repo_type='space', commit_message='Sync GitHub to Space', ignore_patterns=['.git/*', '.github/*'])"
+          hf upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
