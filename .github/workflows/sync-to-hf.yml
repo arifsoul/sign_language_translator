@@ -12,13 +12,21 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           lfs: true
 
-      - name: Push to Hugging Face Hub
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Hugging Face Hub CLI
+        run: pip install -U "huggingface_hub[cli]"
+
+      - name: Upload Repo to Hugging Face Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config lfs.allowincompletepush true
-          git remote rm origin || true
-          git push --force https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main
+          # The CLI securely uploads only the latest files, 
+          # ignoring Git history where deleted binary files were complaining!
+          huggingface-cli upload arifsoul/sign_language_translator . . --repo-type=space --commit-message="Sync GitHub to Space" --exclude=".git/*" ".github/*"
