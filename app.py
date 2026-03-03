@@ -73,17 +73,19 @@ class ConfigData(BaseModel):
     match: float
     shake: float
     confidence: float
+    k_neighbors: int = 5
 
 @app.get("/config")
 async def get_config():
     config = configparser.ConfigParser()
     config.read(CONFIG_FILE)
     if 'thresholds' not in config:
-        return {"match": 0.5, "shake": 0.5, "confidence": 0.5}
+        return {"match": 0.5, "shake": 0.5, "confidence": 0.5, "k_neighbors": 5}
     return {
         "match": float(config['thresholds'].get('match', 0.5)),
         "shake": float(config['thresholds'].get('shake', 0.5)),
-        "confidence": float(config['thresholds'].get('confidence', 0.5))
+        "confidence": float(config['thresholds'].get('confidence', 0.5)),
+        "k_neighbors": int(config['thresholds'].get('k_neighbors', 5))
     }
 
 @app.post("/config")
@@ -96,6 +98,7 @@ async def save_config(data: ConfigData):
     config.set('thresholds', 'match', str(data.match))
     config.set('thresholds', 'shake', str(data.shake))
     config.set('thresholds', 'confidence', str(data.confidence))
+    config.set('thresholds', 'k_neighbors', str(data.k_neighbors))
     
     with open(CONFIG_FILE, 'w') as f:
         config.write(f)
@@ -154,8 +157,7 @@ async def predict_sign(data: GestureData):
         rel_input = [{"x": p["x"]/max_dist_input, "y": p["y"]/max_dist_input, "z": p["z"]/max_dist_input} for p in centered_input]
         
         # 2. Compute Distances against PROTOTYPES
-        best_match_key = "?"
-        best_dist = float('inf')
+        all_distances = [] # Store tuple of (distance, key)
         
         for key, variations in PROTOTYPES.items():
             if not isinstance(variations, list) or len(variations) == 0:
@@ -189,26 +191,37 @@ async def predict_sign(data: GestureData):
                         (rel_input[i]["z"] - (lms[i].get("z", 0)))**2
                     )
                 avg_dist = dist / 21.0
+                all_distances.append((avg_dist, key))
                 
-                if avg_dist < best_dist:
-                    best_dist = avg_dist
-                    best_match_key = key
+        # Sort all distances ascending
+        all_distances.sort(key=lambda x: x[0])
                 
         # 3. Evaluasi terhadap Threshold Konfigurasi
         # match_slider dari UI bernilai 0.0 - 1.0. Makin besar (e.g 1.0) artinya AI harus makin strict/yakin.
         config = configparser.ConfigParser()
         config.read(CONFIG_FILE)
         match_threshold = float(config['thresholds'].get('match', 0.5)) if 'thresholds' in config else 0.5
+        k_neighbors = int(config['thresholds'].get('k_neighbors', 5)) if 'thresholds' in config else 5
         
         # Range wajar avg_dist adalah 0.05 (sangat mirip) hingga ~0.4 (sangat beda).
         # Kita petakan ke dynamic_dist_threshold. Jika match_threshold=1.0 -> dist_thresh = 0.12 (Strict)
         # Jika match_threshold=0.0 -> dist_thresh = 0.40 (Loose)
         dynamic_dist_threshold = 0.40 - (match_threshold * 0.28)
         
-        if best_dist > dynamic_dist_threshold:
-            predicted_char = "?"
-        else:
-            predicted_char = best_match_key
+        # Determine prediction using K-Nearest Neighbors
+        predicted_char = "?"
+        if all_distances:
+            # Only consider nearest neighbors that meet the threshold requirement
+            # and take the top K specified by the user
+            valid_neighbors = [item for item in all_distances[:k_neighbors] if item[0] <= dynamic_dist_threshold]
+            
+            if valid_neighbors:
+                from collections import Counter
+                # Majority vote among the valid k-nearest neighbors
+                votes = [item[1] for item in valid_neighbors]
+                vote_counts = Counter(votes)
+                # most_common(1) returns a list like [('A', 3)]
+                predicted_char = vote_counts.most_common(1)[0][0]
 
         return {"prediction": predicted_char}
 

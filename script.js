@@ -37,6 +37,7 @@ const LETTER_COOLDOWN = 1200;
 let MATCH_SLIDER = 0.50; // 0-1 UI value
 let MATCH_THRESHOLD = 0.85; // Internal mapped value
 let SHAKE_SLIDER = 0.50; // 0-1 UI value
+let K_NEIGHBORS = 5; // KNN value
 
 // ... (rest of the file constants)
 // I'll use multi_replace for specific parts instead to be safer with large file
@@ -56,6 +57,7 @@ async function init() {
         'camera-status-text', 'virtual-cursor',
         'match-threshold-input', 'match-threshold-val',
         'shake-threshold-input', 'shake-threshold-val',
+        'k-neighbors-input', 'k-neighbors-val',
         'word-buffer-container', 'open-settings-btn', 'close-settings-btn',
         'settings-modal', 'settings-backdrop', 'settings-content',
         'save-settings-btn', 'ai-notification-container', 'history-container',
@@ -168,6 +170,14 @@ function setupEventListeners() {
             els['shake-threshold-val'].innerText = SHAKE_SLIDER.toFixed(2);
         });
         els['shake-threshold-input'].addEventListener('change', saveConfig);
+    }
+
+    if (els['k-neighbors-input']) {
+        els['k-neighbors-input'].addEventListener('input', (e) => {
+            K_NEIGHBORS = parseInt(e.target.value);
+            els['k-neighbors-val'].innerText = K_NEIGHBORS;
+        });
+        els['k-neighbors-input'].addEventListener('change', saveConfig);
     }
 
     // ContentEditable Sync
@@ -895,7 +905,22 @@ function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandInde
     .then(res => res.json())
     .then(data => {
         isFetchingPrediction = false;
-        const char = data.prediction;
+        
+        let char = data.prediction;
+        
+        // SEMI-LOCK LOGIC:
+        // Jika status sedang menunggu ayunan (isWaitingForShake) aktif, 
+        // kita KUNCI prediksi yang sebelumnya stabil selama 1.5 detik ekstra
+        // agar tidak tiba-tiba berubah saat tangan mulai menggoyang (shake down)
+        
+        if (isWaitingForShake && Date.now() - continuousPredictionStartTime < 2500) {
+            // override the prediction with what was already stabilized 
+            // as long as it hasn't been more than 2.5s since it first stabilized (1s wait + 1.5s lock)
+            char = currentContinuousPrediction;
+        } else if (isWaitingForShake && Date.now() - continuousPredictionStartTime >= 2500) {
+            // Lock expired
+            isWaitingForShake = false;
+        }
         
         if (char && char !== "?") {
             els['confidence-container']?.classList.remove('opacity-0');
@@ -908,12 +933,14 @@ function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandInde
                 const duration = Date.now() - continuousPredictionStartTime;
                 
                 if (duration > 1000 && !isWaitingForShake) {
-                    // Berhasil stabil lebih dari 1 detik!
-                    console.log(`✅ AI Stabilized on: ${char}. Showing Shake Down arrow...`);
+                    // Berhasil stabil lebih dari 1 detik! Mulai KUNCI.
+                    console.log(`✅ AI Stabilized on: ${char}. Showing Shake Down arrow and Locking...`);
                     isWaitingForShake = true;
+                    // reset timer so the 1.5s lock countdown starts cleanly from now
+                    continuousPredictionStartTime = Date.now() - 1000; 
                     
-                    // Ubah UI tampilkan animasi lucide
-                    els['best-match-display'].innerHTML = `${char} <i data-lucide="arrow-down-to-line" class="inline-block w-8 h-8 text-amber-500 animate-bounce ml-2"></i>`; 
+                    // Ubah UI tampilkan animasi lucide warna hijau untuk menandakan Terkunci
+                    els['best-match-display'].innerHTML = `<span class="text-emerald-500">${char}</span> <i data-lucide="lock" class="inline-block w-4 h-4 text-emerald-500 mb-2"></i> <i data-lucide="arrow-down-to-line" class="inline-block w-8 h-8 text-emerald-500 animate-bounce ml-1"></i>`; 
                     if (window.lucide) {
                         window.lucide.createIcons({
                             root: els['confidence-container']
@@ -924,14 +951,18 @@ function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandInde
                     els['best-match-display'].innerText = char;
                 }
             } else {
-                // Prediksi berganti/fluktuatif. Reset timer stabilisasi.
-                currentContinuousPrediction = char;
-                continuousPredictionStartTime = Date.now();
-                isWaitingForShake = false;
-                els['best-match-display'].innerText = char; // Tampilkan real-time tebakan langsung
+                // Hanya bisa berganti prediksi jika TIDAK sedang terkunci
+                if (!isWaitingForShake) {
+                    currentContinuousPrediction = char;
+                    continuousPredictionStartTime = Date.now();
+                    els['best-match-display'].innerText = char;
+                }
             }
             
         } else {
+            // Jika hasilnya "?" tapi kita SEDANG terkunci, pertahankan locknya
+            if (isWaitingForShake) return;
+            
             // Prediksi hilang atau "?", reset stabilisasi
             currentContinuousPrediction = "";
             isWaitingForShake = false;
@@ -949,10 +980,11 @@ function detectBisindoModel(multiWorldLandmarks, multiHandedness, activeHandInde
     .catch(err => {
         isFetchingPrediction = false;
         console.error("Prediction Error:", err);
-        els['best-match-display'].innerText = "Err";
-        currentContinuousPrediction = "";
-        isWaitingForShake = false;
-        pendingPrediction = "";
+        if (!isWaitingForShake) {
+            els['best-match-display'].innerText = "Err";
+            currentContinuousPrediction = "";
+            pendingPrediction = "";
+        }
     });
 }
 
@@ -1118,6 +1150,12 @@ async function fetchConfig() {
             els['shake-threshold-val'].innerText = parseFloat(data.shake).toFixed(2);
             SHAKE_SLIDER = data.shake;
         }
+
+        if (els['k-neighbors-input'] && data.k_neighbors !== undefined) {
+            els['k-neighbors-input'].value = data.k_neighbors;
+            els['k-neighbors-val'].innerText = data.k_neighbors;
+            K_NEIGHBORS = data.k_neighbors;
+        }
         
     } catch (e) {
         console.error("Failed to fetch config:", e);
@@ -1135,7 +1173,8 @@ async function saveConfig() {
             body: JSON.stringify({
                 match: MATCH_SLIDER,
                 shake: SHAKE_SLIDER,
-                confidence: 0.5 // Obsolete but kept for retrocompatibility with config.ini
+                confidence: 0.5, // Obsolete but kept for retrocompatibility with config.ini
+                k_neighbors: K_NEIGHBORS
             })
         });
     } catch (e) {

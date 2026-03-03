@@ -23,15 +23,15 @@ DATASET_DIR = "bisindo_dataset"
 MODEL_FILE = "bisindo_model.json"
 
 # Augmentation Configuration
-NUM_VARIATIONS = 50        # Includes the original (e.g., 20 means 1 original + 19 augmented)
+NUM_VARIATIONS = 100        # Includes the original (e.g., 20 means 1 original + 19 augmented)
 GUARANTEE_MIRROR = True    # Ensure at least one variation is a horizontally flipped (mirrored) version
 
-# Ranges for randomization
-ROTATION_RANGE = (-15, 15) # Degrees
-SCALE_RANGE = (0.9, 1.1)   # Multiplier (e.g. 0.9 = 90% size)
-TRANS_RANGE = (-20, 20)    # Pixels to shift X and Y
-PERSP_JITTER = 0.05        # Percentage of image width for perspective corner jitter
-MIRROR_CHANCE = 0.1        # Probability of a random variation being mirrored (if GUARANTEE_MIRROR is False or already fulfilled)
+# Ranges for randomization for more variative differences
+ROTATION_RANGE = (-30, 30) # Degrees (expanded)
+SCALE_RANGE = (0.75, 1.25) # Multiplier (expanded)
+TRANS_RANGE = (-40, 40)    # Pixels to shift X and Y (expanded)
+PERSP_JITTER = 0.08        # Percentage of image width for perspective corner jitter
+MIRROR_CHANCE = 0.2        # Probability of a random variation being mirrored
 
 def augment_image(image, index):
     """
@@ -44,29 +44,38 @@ def augment_image(image, index):
     h, w = image.shape[:2]
     center = (w // 2, h // 2)
 
-    # 1. Random Rotation (from configured range)
+    # 1. Random Rotation and Scale
     angle = np.random.uniform(ROTATION_RANGE[0], ROTATION_RANGE[1])
-    
-    # 2. Random Scale (from configured range)
     scale = np.random.uniform(SCALE_RANGE[0], SCALE_RANGE[1])
     
-    # 3. Random Translation (from configured range)
-    tx = np.random.uniform(TRANS_RANGE[0], TRANS_RANGE[1])
-    ty = np.random.uniform(TRANS_RANGE[0], TRANS_RANGE[1])
-
-    # Get rotation matrix
+    # Get initial rotation matrix
     M_rot = cv2.getRotationMatrix2D(center, angle, scale)
     
-    # Add translation to the matrix
-    M_rot[0, 2] += tx
-    M_rot[1, 2] += ty
-
-    # Apply affine transformation (Rotation + Scale + Translation)
-    # Use BORDER_REPLICATE to avoid black edges when shifting
-    augmented = cv2.warpAffine(image, M_rot, (w, h), borderMode=cv2.BORDER_REPLICATE)
+    # PREVENT CROPPING: Calculate the new bounding box dimensions
+    abs_cos = abs(M_rot[0, 0])
+    abs_sin = abs(M_rot[0, 1])
     
-    # 4. Perspective Warp (simulate slight 3D camera angle shift)
-    # Randomly jitter the 4 corners
+    new_w = int(h * abs_sin + w * abs_cos)
+    new_h = int(h * abs_cos + w * abs_sin)
+    
+    # Adjust translation in the rotation matrix to center the image
+    M_rot[0, 2] += (new_w / 2) - center[0]
+    M_rot[1, 2] += (new_h / 2) - center[1]
+
+    # Apply Rotation + Scale without cropping (new size)
+    augmented = cv2.warpAffine(image, M_rot, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # 2. Random Translation
+    tx = np.random.uniform(TRANS_RANGE[0], TRANS_RANGE[1])
+    ty = np.random.uniform(TRANS_RANGE[0], TRANS_RANGE[1])
+    
+    M_trans = np.float32([[1, 0, tx], [0, 1, ty]])
+    augmented = cv2.warpAffine(augmented, M_trans, (new_w, new_h), borderMode=cv2.BORDER_REPLICATE)
+    
+    # Update dimensions for perspective
+    h, w = augmented.shape[:2]
+
+    # 3. Perspective Warp (simulate slight 3D camera angle shift)
     margin = int(w * PERSP_JITTER)
     pts1 = np.float32([[0, 0], [w, 0], [0, h], [w, h]])
     pts2 = np.float32([
@@ -79,10 +88,6 @@ def augment_image(image, index):
     M_persp = cv2.getPerspectiveTransform(pts1, pts2)
     augmented = cv2.warpPerspective(augmented, M_persp, (w, h), borderMode=cv2.BORDER_REPLICATE)
     
-    # 5. Mirroring Logic.
-    # Note: If guaranteed mirror is requested, the logic in main() will pass a specific flag
-    # Custom kwarg `force_mirror` could be used, but for simplicity we'll handle it during 
-    # the loop. Let's add it to the signature dynamically.
     return augmented
 
 def apply_mirror(image):
@@ -117,17 +122,26 @@ def extract_landmarks(image):
     
     results = detector.detect(mp_image)
     
-    if not results.hand_landmarks:
+    if not results.hand_world_landmarks or not results.hand_landmarks:
         return None
         
     # Take the first hand found
-    hand_landmarks = results.hand_landmarks[0]
+    hand_world_landmarks = results.hand_world_landmarks[0]
+    
+    # Get Handedness category to match train.py logic (important for correct matching)
+    handedness = results.handedness[0][0].category_name.lower()
     
     landmarks = []
-    for lm in hand_landmarks:
+    # Using hand_world_landmarks for 3D positional scale stability
+    for lm in hand_world_landmarks:
          landmarks.append({'x': lm.x, 'y': lm.y, 'z': lm.z})
          
-    return normalize_landmarks(landmarks)
+    normalized = normalize_landmarks(landmarks)
+    
+    return {
+        'handedness': handedness,
+        'landmarks': normalized
+    }
 
 def main():
     print(f"Starting Data Augmentation pipeline...")

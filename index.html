@@ -237,6 +237,19 @@
                 </div>
 
                 <div class="space-y-10">
+                    <!-- K-Nearest Neighbors (KNN) -->
+                    <div class="space-y-5">
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center gap-3">
+                                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+                                <label class="text-[0.7rem] font-black text-slate-600 dark:text-white/60 uppercase tracking-widest">K-Nearest Neighbors (K)</label>
+                            </div>
+                            <span id="k-neighbors-val" class="px-3 py-1 rounded-lg bg-emerald-500/10 text-xs font-black text-emerald-500">5</span>
+                        </div>
+                        <input type="range" id="k-neighbors-input" min="1" max="15" step="2" value="5" class="w-full accent-emerald-500">
+                        <p class="text-[0.6rem] leading-relaxed text-slate-400 dark:text-white/30 italic px-4.5">Menentukan jumlah sampel terdekat yang akan 'voting' untuk memastikan prediksi akurat. Nilai yg lebih tinggi (misal 5 atau 7) mengabaikan outlier/kesalahan dataset.</p>
+                    </div>
+
                     <!-- Match Sensitivity -->
                     <div class="space-y-5">
                         <div class="flex justify-between items-center">
