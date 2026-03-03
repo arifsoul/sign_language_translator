@@ -1,0 +1,23 @@
+name: Sync to Hugging Face Hub
+
+on:
+  push:
+    branches: [main, master]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true # Pastikan LFS (model json/task) ikut ter-checkout
+
+      - name: Push to Hugging Face Hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git push --force https://arifsoul:$HF_TOKEN@huggingface.co/spaces/arifsoul/sign_language_translator main
