@@ -5,3 +5,4 @@ gtts
 python-dotenv
 opencv-python
 mediapipe
+huggingface_hub
