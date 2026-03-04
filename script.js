@@ -1229,6 +1229,12 @@ function playAudio(base64) {
 async function startCamera() {
     updateStatus('processing', 'Meminta Kamera...');
     try {
+        // Browser modern memblokir akses kemera (navigator.mediaDevices) jika tidak menggunakan HTTPS atau localhost
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert("Akses kamera diblokir oleh browser karena masalah keamanan.\n\nPastikan Anda mengakses web ini menggunakan HTTPS (SSL) atau melalui localhost.");
+            throw new Error("Kamera membutuhkan HTTPS (Secure Context)");
+        }
+        
         cameraStream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
         els['webcam'].srcObject = cameraStream;
         els['webcam'].onloadedmetadata = () => {
@@ -1245,6 +1251,9 @@ async function startCamera() {
         isDetecting = true;
     } catch (err) {
         console.error("Error:", err);
+        if (err.name === 'NotAllowedError') {
+             alert("Izin kamera ditolak. Mohon izinkan akses kamera di pengaturan browser Anda.");
+        }
         updateStatus('inactive', 'Gagal Kamera');
         resetToggleUI();
     }
